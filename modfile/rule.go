@@ -88,9 +88,10 @@ type VersionInterval struct {
 
 // A Require is a single require statement.
 type Require struct {
-	Mod      module.Version
-	Indirect bool // has "// indirect" comment
-	Syntax   *Line
+	Mod          module.Version
+	Indirect     bool // has "// indirect" comment
+	IgnoreUnused bool // has "// ignore-unused" comment
+	Syntax       *Line
 }
 
 func (r *Require) markRemoved() {
@@ -119,46 +120,45 @@ func (r *Require) setVersion(v string) {
 	}
 }
 
-// setIndirect sets line to have (or not have) a "// indirect" comment.
-func (r *Require) setIndirect(indirect bool) {
-	r.Indirect = indirect
+// setCommentTokens sets line to have (or not have) a "// indirect" comment.
+func (r *Require) setCommentTokens(indirect bool, ignoreUnused bool) {
 	line := r.Syntax
-	if isIndirect(line) == indirect {
-		return
-	}
-	if indirect {
-		// Adding comment.
-		if len(line.Suffix) == 0 {
-			// New comment.
-			line.Suffix = []Comment{{Token: "// indirect", Suffix: true}}
-			return
-		}
-
-		com := &line.Suffix[0]
-		text := strings.TrimSpace(strings.TrimPrefix(com.Token, string(slashSlash)))
-		if text == "" {
-			// Empty comment.
-			com.Token = "// indirect"
-			return
-		}
-
-		// Insert at beginning of existing comment.
-		com.Token = "// indirect; " + text
-		return
+	var comments []string
+	if len(line.Suffix) > 0 {
+		comments = strings.Split(strings.TrimPrefix(line.Suffix[0].Token, string(slashSlash)), ";")
 	}
 
-	// Removing comment.
-	f := strings.TrimSpace(strings.TrimPrefix(line.Suffix[0].Token, string(slashSlash)))
-	if f == "indirect" {
-		// Remove whole comment.
+	tokens := map[string]bool{
+		"indirect":      indirect,
+		"ignore-unused": ignoreUnused,
+	}
+
+	for token, add := range tokens {
+		index := -1
+		for i, comment := range comments {
+			if strings.TrimSpace(comment) == token {
+				index = i
+				break
+			}
+		}
+		if add && index == -1 {
+			comments = append([]string{token}, comments...)
+		} else if !add && index != -1 {
+			comments = append(comments[:index], comments[index+1:]...)
+		}
+	}
+	if len(comments) == 0 {
 		line.Suffix = nil
 		return
 	}
-
-	// Remove comment prefix.
-	com := &line.Suffix[0]
-	i := strings.Index(com.Token, "indirect;")
-	com.Token = "//" + com.Token[i+len("indirect;"):]
+	var sanitizedComments []string
+	for _, comment := range comments {
+		comment = strings.TrimSpace(comment)
+		if len(comment) > 0 {
+			sanitizedComments = append(sanitizedComments, comment)
+		}
+	}
+	line.Suffix = []Comment{{Token: "// " + strings.Join(sanitizedComments, "; "), Suffix: true}}
 }
 
 // isIndirect reports whether line has a "// indirect" comment,
@@ -166,11 +166,24 @@ func (r *Require) setIndirect(indirect bool) {
 // so that it can be dropped entirely once the effective version of the
 // indirect dependency reaches the given minimum version.
 func isIndirect(line *Line) bool {
+	return hasCommentToken(line, "indirect")
+}
+
+func hasCommentToken(line *Line, token string) bool {
 	if len(line.Suffix) == 0 {
 		return false
 	}
 	f := strings.Fields(strings.TrimPrefix(line.Suffix[0].Token, string(slashSlash)))
-	return (len(f) == 1 && f[0] == "indirect" || len(f) > 1 && f[0] == "indirect;")
+	for _, comment := range f {
+		if comment == token || comment == token+";" {
+			return true
+		}
+	}
+	return false
+}
+
+func isIgnoreUnused(line *Line) bool {
+	return hasCommentToken(line, "ignore-unused")
 }
 
 func (f *File) AddModuleStmt(path string) error {
@@ -411,9 +424,10 @@ func (f *File) add(errs *ErrorList, block *LineBlock, line *Line, verb string, a
 		}
 		if verb == "require" {
 			f.Require = append(f.Require, &Require{
-				Mod:      module.Version{Path: s, Version: v},
-				Syntax:   line,
-				Indirect: isIndirect(line),
+				Mod:          module.Version{Path: s, Version: v},
+				Syntax:       line,
+				Indirect:     isIndirect(line),
+				IgnoreUnused: isIgnoreUnused(line),
 			})
 		} else {
 			f.Exclude = append(f.Exclude, &Exclude{
@@ -963,20 +977,20 @@ func (f *File) AddRequire(path, vers string) error {
 	}
 
 	if need {
-		f.AddNewRequire(path, vers, false)
+		f.AddNewRequire(path, vers, false, false)
 	}
 	return nil
 }
 
 // AddNewRequire adds a new require line for path at version vers at the end of
 // the last require block, regardless of any existing require lines for path.
-func (f *File) AddNewRequire(path, vers string, indirect bool) {
+func (f *File) AddNewRequire(path, vers string, indirect bool, ignoreUnused bool) {
 	line := f.Syntax.addLine(nil, "require", AutoQuote(path), vers)
 	r := &Require{
 		Mod:    module.Version{Path: path, Version: vers},
 		Syntax: line,
 	}
-	r.setIndirect(indirect)
+	r.setCommentTokens(indirect, ignoreUnused)
 	f.Require = append(f.Require, r)
 }
 
@@ -996,15 +1010,16 @@ func (f *File) AddNewRequire(path, vers string, indirect bool) {
 // after all edits are complete.
 func (f *File) SetRequire(req []*Require) {
 	type elem struct {
-		version  string
-		indirect bool
+		version      string
+		indirect     bool
+		ignoreUnused bool
 	}
 	need := make(map[string]elem)
 	for _, r := range req {
 		if prev, dup := need[r.Mod.Path]; dup && prev.version != r.Mod.Version {
 			panic(fmt.Errorf("SetRequire called with conflicting versions for path %s (%s and %s)", r.Mod.Path, prev.version, r.Mod.Version))
 		}
-		need[r.Mod.Path] = elem{r.Mod.Version, r.Indirect}
+		need[r.Mod.Path] = elem{r.Mod.Version, r.Indirect, r.IgnoreUnused}
 	}
 
 	// Update or delete the existing Require entries to preserve
@@ -1013,7 +1028,7 @@ func (f *File) SetRequire(req []*Require) {
 		e, ok := need[r.Mod.Path]
 		if ok {
 			r.setVersion(e.version)
-			r.setIndirect(e.indirect)
+			r.setCommentTokens(e.indirect, e.ignoreUnused)
 		} else {
 			r.markRemoved()
 		}
@@ -1026,7 +1041,7 @@ func (f *File) SetRequire(req []*Require) {
 	// This step is nondeterministic, but the final result will be deterministic
 	// because we will sort the block.
 	for path, e := range need {
-		f.AddNewRequire(path, e.version, e.indirect)
+		f.AddNewRequire(path, e.version, e.indirect, e.ignoreUnused)
 	}
 
 	f.SortBlocks()
@@ -1067,7 +1082,7 @@ func (f *File) SetRequireSeparateIndirect(req []*Require) {
 			line = &Line{Token: []string{AutoQuote(r.Mod.Path), r.Mod.Version}}
 			r.Syntax = line
 			if r.Indirect {
-				r.setIndirect(true)
+				r.setCommentTokens(true, r.IgnoreUnused)
 			}
 		} else {
 			line = new(Line)
@@ -1223,7 +1238,7 @@ func (f *File) SetRequireSeparateIndirect(req []*Require) {
 		}
 		have[r.Mod.Path] = r
 		r.setVersion(need[path].Mod.Version)
-		r.setIndirect(need[path].Indirect)
+		r.setCommentTokens(need[path].Indirect, need[path].IgnoreUnused)
 		if need[path].Indirect &&
 			(oneFlatUncommentedBlock || lineToBlock[r.Syntax] == lastDirectBlock) {
 			moveReq(r, lastIndirectBlock)

@@ -177,8 +177,8 @@ var setRequireTests = []struct {
 			x.y/c v1.2.3 // indirect; c
 			x.y/d v1.2.3 // indirect; c
 			x.y/e v1.2.3 // indirect
-			x.y/f v1.2.3 //indirect
-			x.y/g v1.2.3 //	indirect
+			x.y/f v1.2.3 // indirect
+			x.y/g v1.2.3 // indirect
 		)
 		`,
 	},
@@ -334,8 +334,8 @@ var setRequireSeparateIndirectTests = []struct {
 			x.y/c v1.2.3 // indirect; c
 			x.y/d v1.2.3 // indirect; c
 			x.y/e v1.2.3 // indirect
-			x.y/f v1.2.3 //indirect
-			x.y/g v1.2.3 //	indirect
+			x.y/f v1.2.3 // indirect
+			x.y/g v1.2.3 // indirect
 		)
 		`,
 	},

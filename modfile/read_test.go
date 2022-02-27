@@ -128,6 +128,7 @@ func TestParseLax(t *testing.T) {
 			key2 value2
 		)
 		require good v1.0.0
+		require comments v1.0.0 // ignore-unused
 	`)
 	f, err := ParseLax("file", badFile, nil)
 	if err != nil {
@@ -138,6 +139,39 @@ func TestParseLax(t *testing.T) {
 	}
 	if len(f.Require) != 1 || f.Require[0].Mod.Path != "good" {
 		t.Errorf("require directive at end of file was not parsed")
+	}
+}
+
+func TestParseIgnoreUnused(t *testing.T) {
+	file := []byte(`module m
+		require good v1.0.0
+		require good v1.0.0 // ignore-unused
+		require good v1.0.0 // indirect; ignore-unused
+		require good v1.0.0 // indirect
+		require good v1.0.0 // ignore-unused; indirect
+	`)
+	f, err := parseToFile("go.mod", file, nil, true)
+	if err != nil {
+		t.Fatalf("parseToFile failed to parse file: %v", err)
+	}
+	if f.Module == nil || f.Module.Mod.Path != "m" {
+		t.Errorf("module directive was not parsed")
+	}
+	if len(f.Require) != 5 {
+		t.Errorf("require directive at end of file was not parsed")
+	}
+
+	for index := range f.Require {
+		switch index {
+		case 0, 3:
+			if f.Require[index].IgnoreUnused {
+				t.Errorf("unexpected ignore-unused on require #%d", index+1)
+			}
+		case 1, 2, 4:
+			if !f.Require[index].IgnoreUnused {
+				t.Errorf("expected ignore-unused on require #%d", index+1)
+			}
+		}
 	}
 }
 
